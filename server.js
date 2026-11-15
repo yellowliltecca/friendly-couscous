@@ -51,13 +51,26 @@ function limited(req) {
 }
 function cleanNum(v, min, max) { const n = Number(v); if (!Number.isFinite(n)) throw new Error('Некорректные координаты или радиус'); return Math.min(max, Math.max(min, n)); }
 function makeQuery(lat, lon, radius, category) {
-  const r = Math.round(radius * 1000);
-  const around = `around:${r},${lat},${lon}`;
-  if (CATEGORY[category]) {
-    return `[out:json][timeout:20];(nwr(${around})[name]${CATEGORY[category]};);out center tags 350;`;
-  }
-  // One compact selector instead of six independent nwr scans.
-  return `[out:json][timeout:20];(nwr(${around})[name][~"^(amenity|shop|office|craft|leisure|tourism)$"~"."];);out center tags 350;`;
+  const r = Number(radius);
+  const dLat = r / 111.32;
+  const dLon = r / (111.32 * Math.max(0.15, Math.cos(lat * Math.PI / 180)));
+  const south = (lat - dLat).toFixed(5);
+  const north = (lat + dLat).toFixed(5);
+  const west = (lon - dLon).toFixed(5);
+  const east = (lon + dLon).toFixed(5);
+  const box = `${south},${west},${north},${east}`;
+  const selectors = CATEGORY[category]
+    ? [`[name]${CATEGORY[category]}`]
+    : [
+        '[name][amenity~"^(restaurant|cafe|bar|pub|fast_food|food_court|clinic|doctors|dentist|pharmacy|bank|fuel|car_wash|school|kindergarten|theatre|cinema)$"]',
+        '[name][shop]',
+        '[name][office]',
+        '[name][craft]',
+        '[name][leisure~"^(fitness_centre|sports_centre|beauty|spa|golf_course)$"]',
+        '[name][tourism~"^(hotel|guest_house|hostel|museum|attraction)$"]'
+      ];
+  const clauses = selectors.map(selector => `nwr(${box})${selector};`).join('');
+  return `[out:json][timeout:18];(${clauses});out center tags 350;`;
 }
 
 async function upstream(url, options, timeout = REQUEST_TIMEOUT_MS) {
@@ -74,6 +87,7 @@ async function upstream(url, options, timeout = REQUEST_TIMEOUT_MS) {
   } catch (e) { if (e.name === 'AbortError') throw new Error('Превышено время ожидания источника'); throw e; }
   finally { clearTimeout(timer); }
 }
+function distanceKm(lat1,lon1,lat2,lon2){const rad=x=>x*Math.PI/180;const dLat=rad(lat2-lat1),dLon=rad(lon2-lon1);const a=Math.sin(dLat/2)**2+Math.cos(rad(lat1))*Math.cos(rad(lat2))*Math.sin(dLon/2)**2;return 6371*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));}
 async function searchOverpass(lat, lon, radius, category) {
   const query = makeQuery(lat, lon, radius, category);
   const errors = [];
@@ -99,8 +113,9 @@ async function searchOverpass(lat, lon, radius, category) {
         }
       }
       if (!data || !Array.isArray(data.elements)) throw new Error('Источник вернул JSON без массива elements');
+      const filteredElements = data.elements.filter(el => { const p = el.center || el; return Number.isFinite(+p.lat) && Number.isFinite(+p.lon) && distanceKm(lat,lon,+p.lat,+p.lon) <= radius; });
       return {
-        elements: data.elements,
+        elements: filteredElements,
         provider: host,
         timestamp: new Date().toISOString(),
         elapsedMs: Date.now() - started,
@@ -151,7 +166,7 @@ const server = http.createServer(async (req,res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   if (req.method === 'OPTIONS') { res.writeHead(204, { 'Access-Control-Allow-Origin':'*', 'Access-Control-Allow-Methods':'GET,POST,OPTIONS', 'Access-Control-Allow-Headers':'Content-Type' }); return res.end(); }
   if (url.pathname.startsWith('/api/') && limited(req)) return json(res,429,{error:'Слишком много запросов. Подождите минуту и повторите.'});
-  if (req.method === 'GET' && url.pathname === '/api/health') return json(res,200,{ok:true,version:'1.3.0',service:'BIZFINDER search proxy',cacheEntries:cache.size,upstreams:OVERPASS.length,searchTimeoutMs:SEARCH_TOTAL_TIMEOUT_MS});
+  if (req.method === 'GET' && url.pathname === '/api/health') return json(res,200,{ok:true,version:'1.4.0',service:'BIZFINDER search proxy',cacheEntries:cache.size,upstreams:OVERPASS.length,searchTimeoutMs:SEARCH_TOTAL_TIMEOUT_MS});
   if (req.method === 'GET' && url.pathname === '/api/geocode') {
     try { const q=(url.searchParams.get('q')||'').trim(); if(!q) return json(res,400,{error:'Введите город или адрес'}); return json(res,200,await geocode(q)); }
     catch(e){ return json(res,e.status||502,{error:e.message}); }
