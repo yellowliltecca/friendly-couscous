@@ -81,46 +81,42 @@ function distanceKm(lat1,lon1,lat2,lon2){const rad=x=>x*Math.PI/180;const dLat=r
 async function searchOverpass(lat, lon, radius, category) {
   const query = makeQuery(lat, lon, radius, category);
   const errors = [];
+  const emptyProviders = [];
   const started = Date.now();
+  let bestEmpty = null;
   for (const endpoint of OVERPASS) {
     if (Date.now() - started > SEARCH_TOTAL_TIMEOUT_MS) break;
     const host = new URL(endpoint).hostname;
     try {
       let data;
       try {
-        // GET is efficient for this bounded query; some mirrors require POST.
-        data = await upstream(`${endpoint}?data=${encodeURIComponent(query)}`, { method: 'GET' }, REQUEST_TIMEOUT_MS);
+        data = await upstream(`${endpoint}?data=${encodeURIComponent(query)}`, { method:'GET' }, REQUEST_TIMEOUT_MS);
       } catch (getError) {
         if (/HTTP (400|405|406|413|414|415|429)/.test(getError.message)) {
-          const body = new URLSearchParams({ data: query }).toString();
-          data = await upstream(endpoint, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
-            body
-          }, Math.min(REQUEST_TIMEOUT_MS, 6000));
-        } else {
-          throw getError;
-        }
+          const body = new URLSearchParams({data:query}).toString();
+          data = await upstream(endpoint,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded; charset=UTF-8'},body},Math.min(REQUEST_TIMEOUT_MS,6000));
+        } else throw getError;
       }
       if (!data || !Array.isArray(data.elements)) throw new Error('Источник вернул JSON без массива elements');
-      const filteredElements = data.elements.filter(el => { const p = el.center || el; return Number.isFinite(+p.lat) && Number.isFinite(+p.lon) && distanceKm(lat,lon,+p.lat,+p.lon) <= radius; });
-      return {
-        elements: filteredElements,
-        provider: host,
-        timestamp: new Date().toISOString(),
-        elapsedMs: Date.now() - started,
-        queryRadiusKm: radius
-      };
-    } catch (e) {
+      const elements = data.elements.filter(el => {
+        const p=el.center||el;
+        return Number.isFinite(+p.lat)&&Number.isFinite(+p.lon)&&distanceKm(lat,lon,+p.lat,+p.lon)<=radius;
+      });
+      const result={elements,provider:host,timestamp:new Date().toISOString(),elapsedMs:Date.now()-started,queryRadiusKm:radius};
+      if(elements.length) return result;
+      emptyProviders.push(host);
+      if(!bestEmpty) bestEmpty=result;
+      // An empty mirror response is not proof of no businesses; try the next mirror.
+    } catch(e) {
       errors.push(`${host}: ${e.message}`);
     }
   }
-  const err = new Error('Серверы OpenStreetMap не ответили на запрос. ' + errors.join(' | '));
-  err.status = 502;
-  err.details = { elapsedMs: Date.now() - started, attempted: errors.length };
+  if(bestEmpty) return {...bestEmpty,emptyProviders,warning:'Источники ответили без объектов; это может означать неполное покрытие OSM. Попробуйте увеличить радиус или выбрать категорию.'};
+  const err=new Error('Не удалось получить организации ни из одного источника. '+errors.join(' | '));
+  err.status=502;
+  err.details={elapsedMs:Date.now()-started,attempted:errors.length,emptyProviders};
   throw err;
 }
-
 async function geocode(q) {
   const key = `geo:${q.toLowerCase()}`; const hit = cache.get(key);
   if (hit && hit.expires > Date.now()) return { ...hit.value, cached:true };
