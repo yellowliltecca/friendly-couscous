@@ -8,15 +8,17 @@ const ROOT = __dirname;
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.HOST || '0.0.0.0';
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 10 * 60 * 1000);
-const REQUEST_TIMEOUT_MS = Number(process.env.UPSTREAM_TIMEOUT_MS || 9000);
-const SEARCH_TOTAL_TIMEOUT_MS = Number(process.env.SEARCH_TOTAL_TIMEOUT_MS || 26000);
+const REQUEST_TIMEOUT_MS = Number(process.env.UPSTREAM_TIMEOUT_MS || 14000);
+const SEARCH_TOTAL_TIMEOUT_MS = Number(process.env.SEARCH_TOTAL_TIMEOUT_MS || 52000);
 const MAX_BODY = 32 * 1024;
 const cache = new Map();
 const inflight = new Map();
 const rate = new Map();
 const OVERPASS = [
   'https://overpass-api.de/api/interpreter',
-  'https://overpass.kumi.systems/api/interpreter'
+  'https://overpass.kumi.systems/api/interpreter',
+  'https://overpass.private.coffee/api/interpreter',
+  'https://overpass.nchc.org.tw/api/interpreter'
 ];
 
 const MIME = { '.html':'text/html; charset=utf-8', '.js':'text/javascript; charset=utf-8', '.css':'text/css; charset=utf-8', '.json':'application/json; charset=utf-8', '.svg':'image/svg+xml', '.png':'image/png', '.jpg':'image/jpeg', '.jpeg':'image/jpeg', '.ico':'image/x-icon', '.txt':'text/plain; charset=utf-8' };
@@ -62,7 +64,7 @@ function makeQuery(lat, lon, radius, category) {
         '[name][tourism~"^(hotel|guest_house|hostel|museum|attraction)$"]'
       ];
   const clauses = selectors.map(selector => `nwr(${around})${selector};`).join('');
-  return `[out:json][timeout:18];(${clauses});out center tags 700;`;
+  return `[out:json][timeout:25];(${clauses});out center tags 700;`;
 }
 
 async function upstream(url, options, timeout = REQUEST_TIMEOUT_MS) {
@@ -98,7 +100,7 @@ async function searchOverpass(lat, lon, radius, category) {
             method: 'POST',
             headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
             body
-          }, Math.min(REQUEST_TIMEOUT_MS, 4000));
+          }, Math.min(REQUEST_TIMEOUT_MS, 6000));
         } else {
           throw getError;
         }
@@ -156,7 +158,7 @@ const server = http.createServer(async (req,res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   if (req.method === 'OPTIONS') { res.writeHead(204, { 'Access-Control-Allow-Origin':'*', 'Access-Control-Allow-Methods':'GET,POST,OPTIONS', 'Access-Control-Allow-Headers':'Content-Type' }); return res.end(); }
   if (url.pathname.startsWith('/api/') && limited(req)) return json(res,429,{error:'Слишком много запросов. Подождите минуту и повторите.'});
-  if (req.method === 'GET' && url.pathname === '/api/health') return json(res,200,{ok:true,version:'1.1.1',service:'BIZFINDER search proxy',cacheEntries:cache.size,upstreams:OVERPASS.length,searchTimeoutMs:SEARCH_TOTAL_TIMEOUT_MS});
+  if (req.method === 'GET' && url.pathname === '/api/health') return json(res,200,{ok:true,version:'1.2.0',service:'BIZFINDER search proxy',cacheEntries:cache.size,upstreams:OVERPASS.length,searchTimeoutMs:SEARCH_TOTAL_TIMEOUT_MS});
   if (req.method === 'GET' && url.pathname === '/api/geocode') {
     try { const q=(url.searchParams.get('q')||'').trim(); if(!q) return json(res,400,{error:'Введите город или адрес'}); return json(res,200,await geocode(q)); }
     catch(e){ return json(res,e.status||502,{error:e.message}); }
