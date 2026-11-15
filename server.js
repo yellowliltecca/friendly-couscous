@@ -161,7 +161,25 @@ const server = http.createServer(async (req,res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   if (req.method === 'OPTIONS') { res.writeHead(204, { 'Access-Control-Allow-Origin':'*', 'Access-Control-Allow-Methods':'GET,POST,OPTIONS', 'Access-Control-Allow-Headers':'Content-Type' }); return res.end(); }
   if (url.pathname.startsWith('/api/') && limited(req)) return json(res,429,{error:'Слишком много запросов. Подождите минуту и повторите.'});
-  if (req.method === 'GET' && url.pathname === '/api/health') return json(res,200,{ok:true,version:'1.5.0',service:'BIZFINDER search proxy',cacheEntries:cache.size,upstreams:OVERPASS.length,searchTimeoutMs:SEARCH_TOTAL_TIMEOUT_MS});
+  if (req.method === 'GET' && url.pathname === '/api/health') return json(res,200,{ok:true,version:'1.5.1',service:'BIZFINDER search proxy',cacheEntries:cache.size,upstreams:OVERPASS.length,searchTimeoutMs:SEARCH_TOTAL_TIMEOUT_MS});
+  if (req.method === 'GET' && url.pathname === '/api/diagnostics') {
+    const lat=cleanNum(url.searchParams.get('lat')||51.48,-85,85);
+    const lon=cleanNum(url.searchParams.get('lon')||46.12,-180,180);
+    const query=makeQuery(lat,lon,2,'restaurant');
+    const checks=[];
+    for (const endpoint of OVERPASS) {
+      const host=new URL(endpoint).hostname, started=Date.now();
+      try {
+        const data=await upstream(`${endpoint}?data=${encodeURIComponent(query)}`,{method:'GET'},7000);
+        if(!data||!Array.isArray(data.elements)) throw new Error('Invalid Overpass JSON');
+        checks.push({host,ok:true,status:200,count:data.elements.length,elapsedMs:Date.now()-started});
+      } catch(e) {
+        checks.push({host,ok:false,error:e.message,elapsedMs:Date.now()-started});
+      }
+    }
+    return json(res,200,{ok:checks.some(x=>x.ok),version:'1.5.1',testedAt:new Date().toISOString(),center:{lat,lon},checks});
+  }
+
   if (req.method === 'GET' && url.pathname === '/api/geocode') {
     try { const q=(url.searchParams.get('q')||'').trim(); if(!q) return json(res,400,{error:'Введите город или адрес'}); return json(res,200,await geocode(q)); }
     catch(e){ return json(res,e.status||502,{error:e.message}); }
