@@ -10,7 +10,7 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
-      - key: UPSTREAM_TIMEOUT_MS
-        value: "14000"
+      - key: SEARCH_UPSTREAM_TIMEOUT_MS
+        value: "28000"
       - key: SEARCH_TOTAL_TIMEOUT_MS
         value: "52000"

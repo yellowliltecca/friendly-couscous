@@ -13,7 +13,7 @@
 <header class="topbar"><div class="brand"><div class="brandmark">B</div>BIZFINDER</div><nav class="nav"><button class="active" data-page="search">Поиск бизнесов</button><button data-page="leads">Мои лиды</button><button data-page="ready">Готовые сайты</button><button data-page="development">Разработка</button><button data-page="tasks">Задачи</button><button data-page="analytics">Аналитика</button></nav><div class="topright"><span class="small">Рабочее пространство</span><div class="avatar">А</div><b>Артём</b></div></header>
 <div class="app" id="searchPage">
 <aside class="panel sidebar"><h1 class="h1">Поиск бизнесов</h1><div class="muted small">Находите компании и управляйте предложениями</div>
-<div class="field"><label>ГОРОД ИЛИ АДРЕС</label><input class="control" id="city" list="cities" value="Москва" placeholder="Введите город или адрес"/><datalist id="cities"><option>Москва</option><option>Санкт-Петербург</option><option>Химки</option><option>Amsterdam</option><option>Rotterdam</option><option>Berlin</option><option>Paris</option><option>London</option></datalist><div class="muted small" id="cityStatus" style="margin-top:5px">Город можно искать по всему миру</div></div>
+<div class="field"><label>ГОРОД ИЛИ АДРЕС</label><input class="control" id="city" list="cities" value="Москва" placeholder="Введите город или адрес"/><datalist id="cities"><option>Москва</option><option>Санкт-Петербург</option><option>Химки</option><option>Amsterdam</option><option>Rotterdam</option><option>Berlin</option><option>Paris</option><option>London</option></datalist><div class="muted small" id="cityStatus" role="status" aria-live="polite" style="margin-top:5px">Город можно искать по всему миру</div></div>
 <div class="field"><label>КАТЕГОРИЯ БИЗНЕСА</label><select class="control" id="category"><option value="all">Все категории</option><option>Ресторан</option><option>Кафе</option><option>Барбершоп</option><option>Салон красоты</option><option>Фитнес-клуб</option><option>Автосервис</option><option>Медицина</option></select></div>
 <div class="field"><div class="range-row"><label>РАДИУС ПОИСКА</label><b id="radiusVal">5 км</b></div><input class="range" id="radius" type="range" min="1" max="50" value="5"><div class="range-row muted small"><span>1 км</span><span>50 км</span></div></div>
 <div class="field"><label>РЕЙТИНГ И ОТЗЫВЫ</label><select class="control" id="rating"><option value="0">Любой рейтинг</option><option value="3">От 3,0</option><option value="4">От 4,0</option><option value="4.5">От 4,5</option></select><select class="control" id="reviews" style="margin-top:8px"><option value="0">Любое число отзывов</option><option value="10">От 10 отзывов</option><option value="50">От 50 отзывов</option><option value="100">От 100 отзывов</option></select></div>
@@ -104,8 +104,8 @@ function initMap(){
 }
 let backendProbePromise=null;
 async function backendReady(){
- if(!backendProbePromise)backendProbePromise=(async()=>{try{const r=await fetch('/api/health',{headers:{'Accept':'application/json'},cache:'no-store'});if(!r.ok)return false;const d=await r.json();return d&&d.ok===true}catch(_){return false}})();
- return backendProbePromise;
+ if(!backendProbePromise)backendProbePromise=apiJson('/api/health',{cache:'no-store'},20000).then(d=>d?.ok===true).catch(()=>false);
+ const ready=await backendProbePromise;if(!ready)backendProbePromise=null;return ready;
 }
 async function apiJson(url,options={},timeoutMs=40000){
  const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),timeoutMs);
@@ -168,14 +168,16 @@ async function fetchBusinesses(center,radius){
  return {businesses:businessesFound,provider:result.provider||'BIZFINDER cloud',elapsedMs:result.elapsedMs||0,serverVersion:result.version||'unknown'};
 }
 async function searchBusinesses(){
+ if(document.getElementById('searchBtn').disabled)return;
  const city=document.getElementById('city').value.trim();if(!city){toast('Введите город или адрес');return}
  const btn=document.getElementById('searchBtn'),status=document.getElementById('cityStatus');
  const previous={liveSearch,currentSearchIds,selected,searchCenter:{...searchCenter}};
  btn.disabled=true;btn.textContent='Ищем компании…';status.textContent='Определяем координаты города…';document.getElementById('mapNote').textContent='Подключаем источник организаций…';
  try{
+  const radius=+document.getElementById('radius').value;
   const center=await geocodeCity(city);
   status.textContent='Ищем организации в радиусе '+document.getElementById('radius').value+' км…';
-  const result=await fetchBusinesses(center,+document.getElementById('radius').value),found=result.businesses;
+  const result=await fetchBusinesses(center,radius),found=result.businesses;
   const previousBusinesses=businesses;
   const merged=found.map(item=>{const old=previousBusinesses.find(x=>x.sourceId&&x.sourceId===item.sourceId);return old?{...item,ourUrl:old.ourUrl||item.ourUrl,ourState:old.ourState||item.ourState,contact:old.contact||item.contact,note:old.note||item.note,assignee:old.assignee||item.assignee,history:old.history||item.history,saved:old.saved||item.saved}:item;});
   const byId=new Map(previousBusinesses.map(b=>[String(b.id),b]));merged.forEach(b=>byId.set(String(b.id),b));businesses=[...byId.values()];
@@ -190,8 +192,8 @@ async function searchBusinesses(){
    if(visible.length&&map){const bounds=new maplibregl.LngLatBounds();visible.forEach(b=>bounds.extend([+b.lng,+b.lat]));bounds.extend([center.lng,center.lat]);map.fitBounds(bounds,{padding:55,maxZoom:15,duration:450});}
    toast('Найдено организаций: '+found.length);
   }else{
-   document.getElementById('mapNote').textContent='Источник ответил, но в выбранном радиусе не найдено объектов с названием.';
-   status.textContent=`Источник ${result.provider} ответил: 0 организаций. Попробуйте увеличить радиус или выбрать другую категорию.`;toast('Организации не найдены в выбранном радиусе.');
+   document.getElementById('mapNote').textContent='Источники подтвердили: в выбранном радиусе организации не найдены.';
+   status.textContent=`Организации не найдены. Попробуйте увеличить радиус или выбрать другую категорию.`;toast('Организации не найдены в выбранном радиусе.');
   }
  }catch(e){
   liveSearch=previous.liveSearch;currentSearchIds=previous.currentSearchIds;selected=previous.selected;searchCenter=previous.searchCenter;searchError=null;render();
