@@ -96,14 +96,26 @@ function initMap(){
  map.on('error',e=>{if(e?.error)console.warn('MapLibre map error:',e.error.message||e.error);});
  setTimeout(()=>map.resize(),300);window.addEventListener('resize',()=>map&&map.resize());
 }
+let backendProbePromise=null;
+async function backendReady(){
+ if(!backendProbePromise)backendProbePromise=(async()=>{try{const r=await fetch('/api/health',{headers:{'Accept':'application/json'},cache:'no-store'});if(!r.ok)return false;const d=await r.json();return d&&d.ok===true}catch(_){return false}})();
+ return backendProbePromise;
+}
 async function apiJson(url,options={},timeoutMs=40000){
  const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),timeoutMs);
- try{const response=await fetch(url,{...options,signal:controller.signal,headers:{'Accept':'application/json',...(options.headers||{})}});let data;try{data=await response.json()}catch{throw new Error('Сервер поиска вернул некорректный ответ')}if(!response.ok)throw new Error(data.error||('HTTP '+response.status));return data}catch(e){if(e.name==='AbortError')throw new Error('Сервер поиска не ответил за отведённое время');if(e instanceof TypeError)throw new Error('Не удалось подключиться к серверу BIZFINDER. Запустите проект командой npm start, а не открывайте index.html напрямую.');throw e}finally{clearTimeout(timer)}
+ try{const response=await fetch(url,{...options,signal:controller.signal,headers:{'Accept':'application/json',...(options.headers||{})}});const raw=await response.text();let data;try{data=JSON.parse(raw)}catch{throw new Error('Сервер вернул не JSON (HTTP '+response.status+'). Возможно, backend не запущен на этом хостинге.')}if(!response.ok)throw new Error(data.error||('HTTP '+response.status));return data}catch(e){if(e.name==='AbortError')throw new Error('Сервер поиска не ответил за отведённое время');throw e}finally{clearTimeout(timer)}
+}
+async function fetchExternalJson(url,options={},timeoutMs=12000){
+ const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),timeoutMs);
+ try{const response=await fetch(url,{...options,signal:controller.signal,headers:{'Accept':'application/json',...(options.headers||{})}});const raw=await response.text();if(!response.ok)throw new Error('HTTP '+response.status+' '+raw.slice(0,100));let data;try{data=JSON.parse(raw)}catch{throw new Error('Источник вернул не JSON')};return data}catch(e){if(e.name==='AbortError')throw new Error('тайм-аут');throw e}finally{clearTimeout(timer)}
 }
 async function geocodeCity(query){
  const q=query.trim();if(!q)throw new Error('Введите город или адрес');
- const data=await apiJson('/api/geocode?q='+encodeURIComponent(q),{},20000);
- return {lat:+data.lat,lng:+data.lon,label:data.label,provider:data.provider};
+ if(await backendReady()){try{const data=await apiJson('/api/geocode?q='+encodeURIComponent(q),{},15000);return {lat:+data.lat,lng:+(data.lon??data.lng),label:data.label,provider:data.provider||'BIZFINDER'}}catch(e){console.warn('Backend geocoding failed; using public geocoder:',e.message)}}
+ let photonError;
+ try{const data=await fetchExternalJson('https://photon.komoot.io/api/?limit=5&lang=ru&q='+encodeURIComponent(q),{},12000);const features=data.features||[];if(features.length){const f=features.find(x=>['city','town','village','municipality','administrative'].includes(x.properties?.type))||features[0];const [lng,lat]=f.geometry.coordinates;return {lat:+lat,lng:+lng,label:[f.properties.name,f.properties.state,f.properties.country].filter(Boolean).join(', '),provider:'Photon'}}}catch(e){photonError=e}
+ try{const data=await fetchExternalJson('https://nominatim.openstreetmap.org/search?format=jsonv2&limit=5&addressdetails=1&accept-language=ru&q='+encodeURIComponent(q),{},15000);if(data.length){const f=data.find(x=>['city','town','village','municipality'].includes(x.type))||data[0];return {lat:+f.lat,lng:+f.lon,label:f.display_name,provider:'Nominatim'}}}catch(e){throw new Error('Не удалось определить город. Photon: '+(photonError?.message||'нет результата')+'; Nominatim: '+e.message)}
+ throw new Error('Город или адрес не найден. Уточните запрос.');
 }
 function overpassCategory(){
  const c=document.getElementById('category').value;
@@ -111,14 +123,19 @@ function overpassCategory(){
  return map[c]||'all';
 }
 function mapOsmCategory(t){if(t.amenity==='restaurant')return 'Ресторан';if(t.amenity==='cafe')return 'Кафе';if(t.shop==='hairdresser')return 'Барбершоп';if(t.shop==='beauty')return 'Салон красоты';if(t.leisure==='fitness_centre'||t.leisure==='sports_centre')return 'Фитнес-клуб';if(t.shop==='car_repair')return 'Автосервис';if(['clinic','doctors','dentist','pharmacy'].includes(t.amenity))return 'Медицина';if(t.shop==='florist')return 'Магазин цветов';return t.amenity||t.shop||t.office||t.craft||t.leisure||t.tourism||'Бизнес'}
-async function fetchBusinesses(center,radius){
- const category=overpassCategory();
- const status=document.getElementById('cityStatus');if(status)status.textContent='Запрашиваем сервер BIZFINDER…';
- const result=await apiJson('/api/search',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({lat:center.lat,lon:center.lng,radius:Number(radius),category})},30000);
+function overpassQuery(center,radius,category){
+ const r=Math.round(Number(radius)*1000),around=`around:${r},${center.lat},${center.lng}`;
+ const selectors=category==='restaurant'?['[amenity="restaurant"]']:category==='cafe'?['[amenity="cafe"]']:category==='barber'?['[shop="hairdresser"]']:category==='beauty'?['[shop="beauty"]']:category==='fitness'?['[leisure~"^(fitness_centre|sports_centre)$"]']:category==='auto'?['[shop="car_repair"]']:category==='medical'?['[amenity~"^(clinic|doctors|dentist|pharmacy)$"]']:[
+  '[amenity~"^(restaurant|cafe|bar|pub|fast_food|clinic|doctors|dentist|pharmacy|bank|fuel|car_wash|school|kindergarten)$"]',
+  '[shop]','[office]','[craft]','[leisure~"^(fitness_centre|sports_centre|beauty|spa)$"]','[tourism~"^(hotel|guest_house|hostel|museum|attraction)$"]'
+ ];
+ return `[out:json][timeout:18];(${selectors.map(x=>`nwr(${around})[name]${x};`).join('')});out center tags 500;`;
+}
+function normalizeOsmElements(elements,center){
  const seen=new Set();
- return (result.elements||[]).map(el=>{
+ return (elements||[]).map(el=>{
   const t=el.tags||{},lat=el.lat??el.center?.lat,lng=el.lon??el.center?.lon;
-  if(!t.name||!Number.isFinite(+lat)||!Number.isFinite(+lng))return null;
+  if(!t.name||lat==null||lng==null||!Number.isFinite(+lat)||!Number.isFinite(+lng))return null;
   const sourceId='osm-'+el.type+'-'+el.id;if(seen.has(sourceId))return null;seen.add(sourceId);
   const address=[t['addr:street'],t['addr:housenumber'],t['addr:city']].filter(Boolean).join(', ');
   const website=t.website||t['contact:website']||'',phone=t.phone||t['contact:phone']||'',email=t.email||t['contact:email']||'';
@@ -127,33 +144,68 @@ async function fetchBusinesses(center,radius){
   return {...(existing||{}),id:stableId,sourceId,source:'OpenStreetMap',name:t.name,category:mapOsmCategory(t),rating:existing?.rating??0,reviews:existing?.reviews??0,phone:phone||existing?.phone||'',email:email||existing?.email||'',address:address||t['addr:full']||center.label||'Адрес не указан',website,siteState:website?'yes':(existing?.siteState||'unknown'),ourUrl:existing?.ourUrl||'',ourState:existing?.ourState||'none',contact:existing?.contact||'new',note:existing?.note||'',assignee:existing?.assignee||'Не назначен',lat:+lat,lng:+lng,offer:website?'replace':(existing?.offer||'verify')};
  }).filter(Boolean).slice(0,1500);
 }
+async function fetchBusinesses(center,radius){
+ const category=overpassCategory(),started=Date.now(),status=document.getElementById('cityStatus');
+ if(await backendReady()){
+  try{
+   if(status)status.textContent='Запрашиваем сервер BIZFINDER…';
+   const data=await apiJson('/api/search',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({lat:center.lat,lon:center.lng,radius:Number(radius),category})},28000);
+   if(!Array.isArray(data.elements))throw new Error('Backend вернул некорректный список организаций');
+   return {businesses:normalizeOsmElements(data.elements,center),provider:data.provider||'BIZFINDER backend',elapsedMs:data.elapsedMs||Date.now()-started};
+  }catch(e){console.warn('BIZFINDER backend search failed; trying public Overpass:',e.message)}
+ }
+ const query=overpassQuery(center,radius,category);
+ const endpoints=['https://overpass.kumi.systems/api/interpreter','https://overpass.private.coffee/api/interpreter','https://overpass-api.de/api/interpreter','https://overpass.nchc.org.tw/api/interpreter'];
+ const errors=[];
+ for(const endpoint of endpoints){
+  const host=new URL(endpoint).hostname;
+  if(status)status.textContent='Ищем организации через OpenStreetMap ('+host+')…';
+  try{
+   let data;
+   try{
+    data=await fetchExternalJson(endpoint,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8'},body:new URLSearchParams({data:query}).toString()},14000);
+   }catch(postError){
+    if(/HTTP (400|405|406|413|414|415)/.test(postError.message)){
+     data=await fetchExternalJson(endpoint+'?data='+encodeURIComponent(query),{},10000);
+    }else throw postError;
+   }
+   if(!Array.isArray(data.elements))throw new Error('ответ без массива elements');
+   return {businesses:normalizeOsmElements(data.elements,center),provider:host,elapsedMs:Date.now()-started};
+  }catch(e){errors.push(host+': '+e.message);console.warn('Overpass endpoint failed:',host,e.message)}
+ }
+ throw new Error('Не удалось получить организации. GitHub Pages не запускает Node.js backend, а публичные Overpass API не ответили. '+errors.join(' | '));
+}
 async function searchBusinesses(){
  const city=document.getElementById('city').value.trim();if(!city){toast('Введите город или адрес');return}
- const btn=document.getElementById('searchBtn'),status=document.getElementById('cityStatus');btn.disabled=true;btn.textContent='Ищем компании…';
- liveSearch=true;searchError=null;selected=null;document.getElementById('mapNote').textContent='Определяем город и загружаем организации…';status.textContent='Определяем координаты города…';
+ const btn=document.getElementById('searchBtn'),status=document.getElementById('cityStatus');
+ const previous={liveSearch,currentSearchIds,selected,searchCenter:{...searchCenter}};
+ btn.disabled=true;btn.textContent='Ищем компании…';status.textContent='Определяем координаты города…';document.getElementById('mapNote').textContent='Подключаем источник организаций…';
  try{
-  const center=await geocodeCity(city);searchCenter={lat:center.lat,lng:center.lng,label:center.label};
-  document.getElementById('mapCity').textContent=city;
-  if(map)map.flyTo({center:[center.lng,center.lat],zoom:14,duration:500});if(map)map.resize();
-  render();status.textContent='Ищем организации в радиусе '+document.getElementById('radius').value+' км…';
-  const found=await fetchBusinesses(center,+document.getElementById('radius').value);
-  searchError=null;const previous=businesses;
-  const merged=found.map(item=>{const old=previous.find(x=>x.sourceId&&x.sourceId===item.sourceId);return old?{...item,ourUrl:old.ourUrl||item.ourUrl,ourState:old.ourState||item.ourState,contact:old.contact||item.contact,note:old.note||item.note,assignee:old.assignee||item.assignee,history:old.history||item.history,saved:old.saved||item.saved}:item;});
-  const byId=new Map(previous.map(b=>[String(b.id),b]));merged.forEach(b=>byId.set(String(b.id),b));businesses=[...byId.values()];
-  currentSearchIds=new Set(merged.map(b=>String(b.id)));
-  selected=merged[0]?.id??null;save();render();
+  const center=await geocodeCity(city);
+  status.textContent='Ищем организации в радиусе '+document.getElementById('radius').value+' км…';
+  const result=await fetchBusinesses(center,+document.getElementById('radius').value),found=result.businesses;
+  const previousBusinesses=businesses;
+  const merged=found.map(item=>{const old=previousBusinesses.find(x=>x.sourceId&&x.sourceId===item.sourceId);return old?{...item,ourUrl:old.ourUrl||item.ourUrl,ourState:old.ourState||item.ourState,contact:old.contact||item.contact,note:old.note||item.note,assignee:old.assignee||item.assignee,history:old.history||item.history,saved:old.saved||item.saved}:item;});
+  const byId=new Map(previousBusinesses.map(b=>[String(b.id),b]));merged.forEach(b=>byId.set(String(b.id),b));businesses=[...byId.values()];
+  searchCenter={lat:center.lat,lng:center.lng,label:center.label};liveSearch=true;searchError=null;currentSearchIds=new Set(merged.map(b=>String(b.id)));selected=merged[0]?.id??null;
+  document.getElementById('mapCity').textContent=city;if(map){map.flyTo({center:[center.lng,center.lat],zoom:14,duration:450});map.resize();}
+  save();render();
+  const mapped=businessFeatureCollection(filtered()).features.length;
   if(found.length){
-   const mapped=businessFeatureCollection(filtered()).features.length;document.getElementById('mapNote').textContent=`На карте ${mapped} из ${found.length} найденных компаний · OpenFreeMap`;
-   status.textContent=`Найдено организаций: ${found.length} · с координатами: ${mapped} · ${center.label||city} · ${result.provider||'OpenStreetMap'} · ${Math.round((result.elapsedMs||0)/1000)} сек.`;
+   document.getElementById('mapNote').textContent=`На карте ${mapped} из ${found.length} найденных компаний · ${result.provider}`;
+   status.textContent=`Найдено организаций: ${found.length} · с координатами: ${mapped} · ${center.label||city} · ${result.provider} · ${Math.round(result.elapsedMs/1000)} сек.`;
    const visible=filtered().filter(b=>Number.isFinite(+b.lat)&&Number.isFinite(+b.lng));
    if(visible.length&&map){const bounds=new maplibregl.LngLatBounds();visible.forEach(b=>bounds.extend([+b.lng,+b.lat]));bounds.extend([center.lng,center.lat]);map.fitBounds(bounds,{padding:55,maxZoom:15,duration:450});}
    toast('Найдено организаций: '+found.length);
   }else{
-   document.getElementById('mapNote').textContent='В этом радиусе организации с названиями не найдены. Увеличьте радиус или смените категорию.';
-   status.textContent=`Поиск завершён: источник ${result.provider||'OpenStreetMap'} ответил, организаций в радиусе не найдено.`;toast('В этом радиусе организации не найдены. Попробуйте увеличить радиус.');
+   document.getElementById('mapNote').textContent='Источник ответил, но в выбранном радиусе не найдено объектов с названием.';
+   status.textContent=`Источник ${result.provider} ответил: 0 организаций. Попробуйте увеличить радиус или выбрать другую категорию.`;toast('Организации не найдены в выбранном радиусе.');
   }
  }catch(e){
-  searchError=e.message;currentSearchIds=new Set();selected=null;render();status.textContent='Поиск не завершён: '+e.message;document.getElementById('mapNote').textContent='Источники не ответили. Нулевой результат не означает отсутствие бизнесов.';toast('Не удалось получить данные организаций. Проверьте сообщение под полем города.');
+  liveSearch=previous.liveSearch;currentSearchIds=previous.currentSearchIds;selected=previous.selected;searchCenter=previous.searchCenter;searchError=null;render();
+  status.textContent='Поиск не выполнен: '+e.message;document.getElementById('mapNote').textContent='Ошибка источника. Предыдущие результаты сохранены.';
+  if(map){map.flyTo({center:[searchCenter.lng,searchCenter.lat],zoom:13,duration:300});map.resize();}
+  toast('Поиск не выполнен. Предыдущие данные сохранены.');
  }finally{btn.disabled=false;btn.textContent='⌕ Найти реальные бизнесы'}
 }
 function showPage(p){page=p;document.querySelectorAll('.nav button').forEach(b=>b.classList.toggle('active',b.dataset.page===p));document.getElementById('searchPage').style.display=p==='search'?'grid':'none';document.getElementById('otherPage').classList.toggle('active',p!=='search');if(p!=='search')renderPage(p)}
