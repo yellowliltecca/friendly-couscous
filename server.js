@@ -3,33 +3,22 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const { URL } = require('node:url');
+const { createSearch, OVERPASS } = require('./search');
+const VERSION = '2.1.0';
 
 const ROOT = __dirname;
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.HOST || '0.0.0.0';
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 10 * 60 * 1000);
-const REQUEST_TIMEOUT_MS = Number(process.env.UPSTREAM_TIMEOUT_MS || 14000);
+const REQUEST_TIMEOUT_MS = Number(process.env.UPSTREAM_TIMEOUT_MS || 28000);
+const SEARCH_UPSTREAM_TIMEOUT_MS = Number(process.env.SEARCH_UPSTREAM_TIMEOUT_MS || 28000);
 const SEARCH_TOTAL_TIMEOUT_MS = Number(process.env.SEARCH_TOTAL_TIMEOUT_MS || 52000);
 const MAX_BODY = 32 * 1024;
 const cache = new Map();
 const inflight = new Map();
 const rate = new Map();
-const OVERPASS = [
-  'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
-  'https://overpass.private.coffee/api/interpreter',
-  'https://overpass-api.de/api/interpreter',
-  'https://overpass.kumi.systems/api/interpreter',
-  'https://ovp.dresel.systems/api/interpreter'
-];
-
+const searchOverpass = createSearch({ requestTimeoutMs: SEARCH_UPSTREAM_TIMEOUT_MS, totalTimeoutMs: SEARCH_TOTAL_TIMEOUT_MS });
 const MIME = { '.html':'text/html; charset=utf-8', '.js':'text/javascript; charset=utf-8', '.css':'text/css; charset=utf-8', '.json':'application/json; charset=utf-8', '.svg':'image/svg+xml', '.png':'image/png', '.jpg':'image/jpeg', '.jpeg':'image/jpeg', '.ico':'image/x-icon', '.txt':'text/plain; charset=utf-8' };
-const CATEGORY = {
-  restaurant: '[amenity="restaurant"]', cafe: '[amenity="cafe"]', bar: '[amenity="bar"]',
-  barber: '[shop="hairdresser"]', beauty: '[shop="beauty"]', fitness: '[leisure="fitness_centre"]',
-  auto: '[shop="car_repair"]', medical: '[amenity~"^(clinic|doctors|dentist|pharmacy)$"]',
-  florist: '[shop="florist"]', shop: '[shop]', office: '[office]'
-};
-
 function json(res, status, payload) {
   const body = JSON.stringify(payload);
   res.writeHead(status, { 'Content-Type':'application/json; charset=utf-8', 'Cache-Control':'no-store', 'X-Content-Type-Options':'nosniff' });
@@ -51,30 +40,6 @@ function limited(req) {
   return entry.count > 30;
 }
 function cleanNum(v, min, max) { const n = Number(v); if (!Number.isFinite(n)) throw new Error('Некорректные координаты или радиус'); return Math.min(max, Math.max(min, n)); }
-function getSearchBox(lat,lon,radius){
-  const km=Number(radius),dLat=km/111.32,dLon=km/(111.32*Math.max(0.15,Math.cos(lat*Math.PI/180)));
-  return `${(lat-dLat).toFixed(5)},${(lon-dLon).toFixed(5)},${(lat+dLat).toFixed(5)},${(lon+dLon).toFixed(5)}`;
-}
-function getSearchBox(lat,lon,radius){
-  const km=Number(radius),dLat=km/111.32,dLon=km/(111.32*Math.max(0.15,Math.cos(lat*Math.PI/180)));
-  return `${(lat-dLat).toFixed(5)},${(lon-dLon).toFixed(5)},${(lat+dLat).toFixed(5)},${(lon+dLon).toFixed(5)}`;
-}
-function makeQuery(lat,lon,radius,category,mode='business'){
-  const box=getSearchBox(lat,lon,radius);
-  const selector=CATEGORY[category];
-  if(selector) return `[out:json][timeout:25];(nwr(${box})[name]${selector};);out center tags 500;`;
-  if(mode==='named') return `[out:json][timeout:25];(nwr(${box})[name];);out center tags 1200;`;
-  // Search business features independently; no unsupported regex on tag keys.
-  const tags=['amenity','shop','office','craft','leisure','tourism','healthcare','building'];
-  return `[out:json][timeout:25];(${tags.map(tag=>`nwr(${box})[name][${tag}];`).join('')});out center tags 900;`;
-}
-function isBusinessElement(el,allowNamed=false){
-  const t=el.tags||{};
-  if(['amenity','shop','office','craft','leisure','tourism','healthcare'].some(k=>!!t[k]))return true;
-  if(['commercial','retail','industrial','office','public','warehouse'].includes(t.building))return true;
-  if(allowNamed && t.name && !t.highway && !t.waterway && !t.natural && !t.boundary && !t.place)return true;
-  return false;
-}
 async function upstream(url, options, timeout = REQUEST_TIMEOUT_MS) {
   const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), timeout);
   try {
@@ -88,44 +53,6 @@ async function upstream(url, options, timeout = REQUEST_TIMEOUT_MS) {
     return data;
   } catch (e) { if (e.name === 'AbortError') throw new Error('Превышено время ожидания источника'); throw e; }
   finally { clearTimeout(timer); }
-}
-function distanceKm(lat1,lon1,lat2,lon2){const rad=x=>x*Math.PI/180;const dLat=rad(lat2-lat1),dLon=rad(lon2-lon1);const a=Math.sin(dLat/2)**2+Math.cos(rad(lat1))*Math.cos(rad(lat2))*Math.sin(dLon/2)**2;return 6371*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));}
-async function searchOverpass(lat,lon,radius,category){
-  const started=Date.now();
-  const checks=await Promise.all(OVERPASS.map(async endpoint=>{
-    const host=new URL(endpoint).hostname,attemptStarted=Date.now(),errors=[];
-    for(const mode of ['business','named']){
-      try{
-        const query=makeQuery(lat,lon,radius,category,mode);
-        let data;
-        try{
-          data=await upstream(`${endpoint}?data=${encodeURIComponent(query)}`,{method:'GET'},mode==='named'?12000:10000);
-        }catch(getError){
-          if(/HTTP (400|405|406|413|414|415|429)/.test(getError.message)){
-            const body=new URLSearchParams({data:query}).toString();
-            data=await upstream(endpoint,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded; charset=UTF-8'},body},8000);
-          }else throw getError;
-        }
-        if(!data||!Array.isArray(data.elements))throw new Error('Ответ без массива elements');
-        const elements=data.elements.filter(el=>{
-          if(!isBusinessElement(el,mode==='named'))return false;
-          const p=el.center||el;
-          return Number.isFinite(+p.lat)&&Number.isFinite(+p.lon)&&distanceKm(lat,lon,+p.lat,+p.lon)<=radius;
-        });
-        if(elements.length)return {ok:true,host,elements,mode,elapsedMs:Date.now()-attemptStarted};
-        if(mode==='named')return {ok:true,host,elements:[],mode,elapsedMs:Date.now()-attemptStarted};
-      }catch(e){errors.push(e.message);}
-    }
-    return {ok:false,host,error:errors.join(' / '),elapsedMs:Date.now()-attemptStarted};
-  }));
-  const good=checks.filter(x=>x.ok),nonEmpty=good.filter(x=>x.elements.length).sort((a,b)=>b.elements.length-a.elements.length);
-  if(nonEmpty.length){
-    const best=nonEmpty[0];
-    return {elements:best.elements,provider:best.host,queryMode:best.mode,providerResults:checks.map(x=>({host:x.host,ok:x.ok,count:x.elements?.length||0,mode:x.mode||null,error:x.error||null,elapsedMs:x.elapsedMs})),timestamp:new Date().toISOString(),elapsedMs:Date.now()-started,queryRadiusKm:radius};
-  }
-  if(good.length)return {elements:[],provider:good[0].host,providerResults:checks.map(x=>({host:x.host,ok:x.ok,count:x.elements?.length||0,error:x.error||null,elapsedMs:x.elapsedMs})),warning:'Ответ получен, но подходящих объектов с названиями в выбранном радиусе не найдено. Попробуйте увеличить радиус.',timestamp:new Date().toISOString(),elapsedMs:Date.now()-started,queryRadiusKm:radius};
-  const err=new Error('Все источники поиска недоступны: '+checks.map(x=>x.host+': '+x.error).join(' | '));
-  err.status=502;err.details={elapsedMs:Date.now()-started,checks:checks.map(({host,error,elapsedMs})=>({host,error,elapsedMs}))};throw err;
 }
 async function geocode(q) {
   const key = `geo:${q.toLowerCase()}`; const hit = cache.get(key);
@@ -162,16 +89,16 @@ const server = http.createServer(async (req,res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   if (req.method === 'OPTIONS') { res.writeHead(204, { 'Access-Control-Allow-Origin':'*', 'Access-Control-Allow-Methods':'GET,POST,OPTIONS', 'Access-Control-Allow-Headers':'Content-Type' }); return res.end(); }
   if (url.pathname.startsWith('/api/') && limited(req)) return json(res,429,{error:'Слишком много запросов. Подождите минуту и повторите.'});
-  if (req.method === 'GET' && url.pathname === '/api/health') return json(res,200,{ok:true,version:'1.6.0',service:'BIZFINDER search proxy',cacheEntries:cache.size,upstreams:OVERPASS.length,searchTimeoutMs:SEARCH_TOTAL_TIMEOUT_MS});
+  if (req.method === 'GET' && url.pathname === '/api/health') return json(res,200,{ok:true,version:VERSION,service:'BIZFINDER search proxy',cacheEntries:cache.size,upstreams:OVERPASS.length,searchTimeoutMs:SEARCH_TOTAL_TIMEOUT_MS});
   if (req.method === 'GET' && url.pathname === '/api/diagnostics') {
     const lat=cleanNum(url.searchParams.get('lat')||51.48,-85,85);
     const lon=cleanNum(url.searchParams.get('lon')||46.12,-180,180);
     const radius=cleanNum(url.searchParams.get('radius')||5,1,50);
     try {
       const result=await searchOverpass(lat,lon,radius,'all');
-      return json(res,200,{ok:true,version:'2.0.0',center:{lat,lon},radius,count:result.elements.length,provider:result.provider,queryMode:result.queryMode||null,providerResults:result.providerResults||[],elapsedMs:result.elapsedMs,warning:result.warning||null});
+      return json(res,200,{ok:true,version:VERSION,center:{lat,lon},radius,count:result.elements.length,provider:result.provider,queryMode:result.queryMode||null,providerResults:result.providerResults||[],elapsedMs:result.elapsedMs,warning:result.warning||null});
     } catch(e) {
-      return json(res,e.status||502,{ok:false,version:'2.0.0',center:{lat,lon},radius,error:e.message,details:e.details||null});
+      return json(res,e.status||502,{ok:false,version:VERSION,center:{lat,lon},radius,error:e.message,details:e.details||null});
     }
   }
 
@@ -187,7 +114,7 @@ const server = http.createServer(async (req,res) => {
       const key=`search:${lat.toFixed(4)}:${lon.toFixed(4)}:${radius}:${category}`;
       const hit=cache.get(key); if(hit && hit.expires>Date.now()) return json(res,200,{...hit.value,cached:true});
       if(inflight.has(key)) return json(res,200,{...(await inflight.get(key)),cached:true});
-      const task=searchOverpass(lat,lon,radius,category).then(value=>{cache.set(key,{value,expires:Date.now()+CACHE_TTL_MS});return value;}).finally(()=>inflight.delete(key));
+      const task=searchOverpass(lat,lon,radius,category).then(value=>{cache.set(key,{value,expires:Date.now()+(value.elements.length ? CACHE_TTL_MS : 30000)});return value;}).finally(()=>inflight.delete(key));
       inflight.set(key,task); const result=await task; return json(res,200,{...result,cached:false});
     } catch(e) { return json(res,e.status||400,{error:e.message,details:e.details||null}); }
   }

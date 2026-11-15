@@ -11,7 +11,7 @@ BIZFINDER is a map-based business prospecting and lightweight CRM app.
 3. Review the `bizfinder` Web Service and choose the Free plan.
 4. Click **Apply** to deploy.
 5. When the service status becomes **Live**, open its `onrender.com` URL.
-6. Check `https://YOUR-RENDER-URL/api/health`. It should return `ok: true` and version `1.2.0`.
+6. Check `https://YOUR-RENDER-URL/api/health`. It should return `ok: true` and version `2.1.0`.
 
 **Use the Render URL for the live app, not the GitHub Pages URL.** GitHub Pages serves static files and cannot run the Node.js API in `server.js`. Render serves both the frontend and API from one origin, avoiding browser-to-Overpass CORS requests.
 
@@ -30,3 +30,25 @@ Then open http://localhost:8787.
 ## Data limitations
 
 Search results come from OpenStreetMap / Overpass. Coverage varies by place. Phone, email, website, rating and review counts are not guaranteed to exist in OSM. This is not Yandex Maps data.
+
+## Search reliability
+
+Only global Overpass replicas are used. The regional `ovp.dresel.systems` extract
+returns empty results for Engels even when the global replicas have businesses.
+Search sends POST queries, allows 28 seconds per attempt (including transport),
+retries a transient failure once within a 52-second total deadline, and returns
+the first nonempty response without waiting for broken mirrors.
+
+Overpass HTTP 200 responses containing `remark` are treated as errors. Empty
+results require confirmation from two global replicas and are cached for only
+30 seconds; successful nonempty results retain the normal ten-minute cache.
+Failures return HTTP 503, are not cached, and preserve the previous results in
+the browser.
+
+`SEARCH_UPSTREAM_TIMEOUT_MS` controls the search attempt budget (default 28000);
+`SEARCH_TOTAL_TIMEOUT_MS` controls the overall deadline (default 52000). Existing
+Render services with an old `UPSTREAM_TIMEOUT_MS=14000` still get the new search
+default without manually changing their environment. `/api/health` and
+`/api/diagnostics` report the same release version.
+
+Run regression checks with `npm test`.
