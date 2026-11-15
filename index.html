@@ -149,13 +149,18 @@ async function fetchBusinesses(center,radius){
  if(await backendReady()){
   try{
    if(status)status.textContent='Запрашиваем сервер BIZFINDER…';
-   const data=await apiJson('/api/search',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({lat:center.lat,lon:center.lng,radius:Number(radius),category})},28000);
+   const data=await apiJson('/api/search',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({lat:center.lat,lon:center.lng,radius:Number(radius),category})},22000);
    if(!Array.isArray(data.elements))throw new Error('Backend вернул некорректный список организаций');
    return {businesses:normalizeOsmElements(data.elements,center),provider:data.provider||'BIZFINDER backend',elapsedMs:data.elapsedMs||Date.now()-started};
   }catch(e){console.warn('BIZFINDER backend search failed; trying public Overpass:',e.message)}
  }
  const query=overpassQuery(center,radius,category);
- const endpoints=['https://overpass.kumi.systems/api/interpreter','https://overpass.private.coffee/api/interpreter','https://overpass-api.de/api/interpreter','https://overpass.nchc.org.tw/api/interpreter'];
+ const endpoints=[
+  'https://overpass-api.de/api/interpreter',
+  'https://overpass.kumi.systems/api/interpreter',
+  'https://overpass.private.coffee/api/interpreter',
+  'https://overpass.nchc.org.tw/api/interpreter'
+ ];
  const errors=[];
  for(const endpoint of endpoints){
   const host=new URL(endpoint).hostname;
@@ -163,17 +168,21 @@ async function fetchBusinesses(center,radius){
   try{
    let data;
    try{
-    data=await fetchExternalJson(endpoint,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8'},body:new URLSearchParams({data:query}).toString()},14000);
-   }catch(postError){
-    if(/HTTP (400|405|406|413|414|415)/.test(postError.message)){
-     data=await fetchExternalJson(endpoint+'?data='+encodeURIComponent(query),{},10000);
-    }else throw postError;
+    // GET avoids the browser CORS preflight triggered by form-urlencoded POST.
+    // The bounded query is short enough for a normal URL.
+    data=await fetchExternalJson(endpoint+'?data='+encodeURIComponent(query),{},11000);
+   }catch(getError){
+    // Only retry with POST when the server explicitly rejects the GET method/URL.
+    // Do not POST after a timeout or network failure: that would repeat a doomed preflight.
+    if(/HTTP (400|405|406|413|414|415)/.test(getError.message)){
+     data=await fetchExternalJson(endpoint,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8'},body:new URLSearchParams({data:query}).toString()},9000);
+    }else throw getError;
    }
-   if(!Array.isArray(data.elements))throw new Error('ответ без массива elements');
+   if(!data||!Array.isArray(data.elements))throw new Error('ответ без массива elements');
    return {businesses:normalizeOsmElements(data.elements,center),provider:host,elapsedMs:Date.now()-started};
   }catch(e){errors.push(host+': '+e.message);console.warn('Overpass endpoint failed:',host,e.message)}
  }
- throw new Error('Не удалось получить организации. GitHub Pages не запускает Node.js backend, а публичные Overpass API не ответили. '+errors.join(' | '));
+ throw new Error('Публичные источники OpenStreetMap не ответили. Это сетевой отказ или ограничение доступа, а не отсутствие бизнесов. '+errors.join(' | '));
 }
 async function searchBusinesses(){
  const city=document.getElementById('city').value.trim();if(!city){toast('Введите город или адрес');return}
