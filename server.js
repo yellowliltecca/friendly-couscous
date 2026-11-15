@@ -79,42 +79,43 @@ async function upstream(url, options, timeout = REQUEST_TIMEOUT_MS) {
 }
 function distanceKm(lat1,lon1,lat2,lon2){const rad=x=>x*Math.PI/180;const dLat=rad(lat2-lat1),dLon=rad(lon2-lon1);const a=Math.sin(dLat/2)**2+Math.cos(rad(lat1))*Math.cos(rad(lat2))*Math.sin(dLon/2)**2;return 6371*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));}
 async function searchOverpass(lat, lon, radius, category) {
-  const query = makeQuery(lat, lon, radius, category);
-  const errors = [];
-  const emptyProviders = [];
-  const started = Date.now();
-  let bestEmpty = null;
-  for (const endpoint of OVERPASS) {
-    if (Date.now() - started > SEARCH_TOTAL_TIMEOUT_MS) break;
-    const host = new URL(endpoint).hostname;
+  const query=makeQuery(lat,lon,radius,category);
+  const started=Date.now();
+  const checks=await Promise.all(OVERPASS.map(async endpoint=>{
+    const host=new URL(endpoint).hostname, attemptStarted=Date.now();
     try {
       let data;
       try {
-        data = await upstream(`${endpoint}?data=${encodeURIComponent(query)}`, { method:'GET' }, REQUEST_TIMEOUT_MS);
-      } catch (getError) {
-        if (/HTTP (400|405|406|413|414|415|429)/.test(getError.message)) {
-          const body = new URLSearchParams({data:query}).toString();
-          data = await upstream(endpoint,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded; charset=UTF-8'},body},Math.min(REQUEST_TIMEOUT_MS,6000));
+        data=await upstream(`${endpoint}?data=${encodeURIComponent(query)}`,{method:'GET'},9000);
+      } catch(getError) {
+        if(/HTTP (400|405|406|413|414|415|429)/.test(getError.message)){
+          const body=new URLSearchParams({data:query}).toString();
+          data=await upstream(endpoint,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded; charset=UTF-8'},body},6000);
         } else throw getError;
       }
-      if (!data || !Array.isArray(data.elements)) throw new Error('Источник вернул JSON без массива elements');
-      const elements = data.elements.filter(el => {
+      if(!data||!Array.isArray(data.elements))throw new Error('Источник вернул JSON без массива elements');
+      const elements=data.elements.filter(el=>{
         const p=el.center||el;
         return Number.isFinite(+p.lat)&&Number.isFinite(+p.lon)&&distanceKm(lat,lon,+p.lat,+p.lon)<=radius;
       });
-      const result={elements,provider:host,timestamp:new Date().toISOString(),elapsedMs:Date.now()-started,queryRadiusKm:radius};
-      if(elements.length) return result;
-      emptyProviders.push(host);
-      if(!bestEmpty) bestEmpty=result;
-      // An empty mirror response is not proof of no businesses; try the next mirror.
+      return {ok:true,host,elements,elapsedMs:Date.now()-attemptStarted};
     } catch(e) {
-      errors.push(`${host}: ${e.message}`);
+      return {ok:false,host,error:e.message,elapsedMs:Date.now()-attemptStarted};
     }
+  }));
+  const successful=checks.filter(x=>x.ok);
+  const nonEmpty=successful.filter(x=>x.elements.length>0).sort((a,b)=>b.elements.length-a.elements.length);
+  if(nonEmpty.length){
+    const best=nonEmpty[0];
+    return {elements:best.elements,provider:best.host,providerResults:successful.map(x=>({host:x.host,count:x.elements.length,elapsedMs:x.elapsedMs})),timestamp:new Date().toISOString(),elapsedMs:Date.now()-started,queryRadiusKm:radius};
   }
-  if(bestEmpty) return {...bestEmpty,emptyProviders,warning:'Источники ответили без объектов; это может означать неполное покрытие OSM. Попробуйте увеличить радиус или выбрать категорию.'};
-  const err=new Error('Не удалось получить организации ни из одного источника. '+errors.join(' | '));
+  if(successful.length){
+    return {elements:[],provider:successful[0].host,providerResults:successful.map(x=>({host:x.host,count:0,elapsedMs:x.elapsedMs})),warning:'Все ответившие источники вернули 0 объектов. Это не доказывает отсутствие бизнесов: проверьте город, радиус и покрытие OpenStreetMap.',timestamp:new Date().toISOString(),elapsedMs:Date.now()-started,queryRadiusKm:radius};
+  }
+  const details=checks.map(x=>x.host+': '+x.error).join(' | ');
+  const err=new Error('Ни один источник организаций не ответил. '+details);
   err.status=502;
-  err.details={elapsedMs:Date.now()-started,attempted:errors.length,emptyProviders};
+  err.details={elapsedMs:Date.now()-started,attempted:checks.length,checks:checks.map(({host,error,elapsedMs})=>({host,error,elapsedMs}))};
   throw err;
 }
 async function geocode(q) {
