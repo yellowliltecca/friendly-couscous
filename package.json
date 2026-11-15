@@ -1,6 +1,6 @@
 {
   "name": "bizfinder-search-proxy",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "private": true,
   "description": "BIZFINDER frontend with a server-side OpenStreetMap search proxy and cache",
   "scripts": {

@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { URL } = require('node:url');
 const { createSearch, OVERPASS } = require('./search');
-const VERSION = '2.1.0';
+const VERSION = '2.2.0';
 
 const ROOT = __dirname;
 const PORT = Number(process.env.PORT || 8787);

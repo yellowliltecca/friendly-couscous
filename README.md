@@ -11,7 +11,7 @@ BIZFINDER is a map-based business prospecting and lightweight CRM app.
 3. Review the `bizfinder` Web Service and choose the Free plan.
 4. Click **Apply** to deploy.
 5. When the service status becomes **Live**, open its `onrender.com` URL.
-6. Check `https://YOUR-RENDER-URL/api/health`. It should return `ok: true` and version `2.1.0`.
+6. Check `https://YOUR-RENDER-URL/api/health`. It should return `ok: true` and version `2.2.0`.
 
 **Use the Render URL for the live app, not the GitHub Pages URL.** GitHub Pages serves static files and cannot run the Node.js API in `server.js`. Render serves both the frontend and API from one origin, avoiding browser-to-Overpass CORS requests.
 
@@ -52,3 +52,31 @@ default without manually changing their environment. `/api/health` and
 `/api/diagnostics` report the same release version.
 
 Run regression checks with `npm test`.
+
+## Contacts and business details
+
+The business card displays all supplied OSM phone numbers and emails, validated
+Telegram/WhatsApp/VK and other social links, hours, description, brand/operator,
+accessibility and service tags, distance from the search center, and the OSM
+source link. Missing values are not inferred. Network-wide social links are
+identified as potentially shared by branches. Categories are shown in Russian.
+
+OpenStreetMap does not supply review text or consumer ratings. Without a paid
+external API, the app offers clearly labeled searches in Yandex Maps, 2GIS and
+Google Maps using the business name and address. These are search shortcuts,
+not verified branch matches or imported reviews. Rating filters are disabled
+when the current result set has no actual ratings. Demo ratings remain labeled.
+
+## Search area
+
+Drag the center marker to move the search, or drag the boundary marker to resize
+the circle. Radius can also be changed with the slider, numeric input or +/−
+buttons (1–50 km). Marker arrow keys provide a keyboard alternative. The map
+previews the circle while dragging; one debounced search runs after release.
+Increasing the radius requests fresh results rather than filtering the old
+response. Area controls are disabled during a search. On failure the previous
+results, center and radius are restored. Use “Вернуть центр к городу” to return
+to the last geocoded city without resetting the radius.
+
+Business cards keep unsaved note drafts when rerendering or switching cards.
+The CSV export also includes contact links, hours, description and review search.
