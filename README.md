@@ -2,23 +2,20 @@
 
 BIZFINDER is a map-based business prospecting and lightweight CRM app.
 
-## Important: GitHub Pages is static hosting
+## Deploy the complete app (frontend + API) for free
 
-GitHub Pages serves HTML/CSS/JavaScript only. It does not run the Node.js API in `server.js`. The business search API must run as a web service.
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://dashboard.render.com/blueprint/new?repo=https://github.com/yellowliltecca/friendly-couscous)
 
-## Deploy the complete app (frontend + API) to Render
+1. Open the deploy link and sign in to Render.
+2. Connect GitHub and grant Render access to `yellowliltecca/friendly-couscous`.
+3. Review the `bizfinder` Web Service and choose the Free plan.
+4. Click **Apply** to deploy.
+5. When the service status becomes **Live**, open its `onrender.com` URL.
+6. Check `https://YOUR-RENDER-URL/api/health`. It should return `ok: true` and version `1.2.0`.
 
-This repository includes `render.yaml` for a free Render Web Service.
+**Use the Render URL for the live app, not the GitHub Pages URL.** GitHub Pages serves static files and cannot run the Node.js API in `server.js`. Render serves both the frontend and API from one origin, avoiding browser-to-Overpass CORS requests.
 
-1. Open [Render Blueprint](https://render.com/deploy).
-2. Connect GitHub if asked and select `yellowliltecca/friendly-couscous`.
-3. Review the service named `bizfinder` and choose the **Free** plan.
-4. Click **Apply** / **Deploy**.
-5. Wait for the first deployment to finish. A free service may take about a minute to wake after inactivity.
-6. Open the service's `onrender.com` URL. Do not use the GitHub Pages URL for live search.
-7. Check `https://YOUR-RENDER-URL/api/health`; it should return `ok: true` and version `1.2.0`.
-
-The same Render service serves both the frontend and `/api/search`, so browser requests stay same-origin and do not depend on public Overpass CORS support.
+A free web service can sleep when idle and may take a short time to wake. Public Overpass servers can still rate-limit or be unavailable; the app reports this as a source error rather than claiming that no businesses exist.
 
 ## Local Windows run
 
