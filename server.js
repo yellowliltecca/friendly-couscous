@@ -53,18 +53,11 @@ function cleanNum(v, min, max) { const n = Number(v); if (!Number.isFinite(n)) t
 function makeQuery(lat, lon, radius, category) {
   const r = Math.round(radius * 1000);
   const around = `around:${r},${lat},${lon}`;
-  const selectors = CATEGORY[category]
-    ? [`[name]${CATEGORY[category]}`]
-    : [
-        '[name][amenity~"^(restaurant|cafe|bar|pub|fast_food|food_court|clinic|doctors|dentist|pharmacy|bank|fuel|car_wash|school|kindergarten|theatre|cinema)$"]',
-        '[name][shop]',
-        '[name][office]',
-        '[name][craft]',
-        '[name][leisure~"^(fitness_centre|sports_centre|beauty|spa|golf_course)$"]',
-        '[name][tourism~"^(hotel|guest_house|hostel|museum|attraction)$"]'
-      ];
-  const clauses = selectors.map(selector => `nwr(${around})${selector};`).join('');
-  return `[out:json][timeout:25];(${clauses});out center tags 700;`;
+  if (CATEGORY[category]) {
+    return `[out:json][timeout:20];(nwr(${around})[name]${CATEGORY[category]};);out center tags 350;`;
+  }
+  // One compact selector instead of six independent nwr scans.
+  return `[out:json][timeout:20];(nwr(${around})[name][~"^(amenity|shop|office|craft|leisure|tourism)$"~"."];);out center tags 350;`;
 }
 
 async function upstream(url, options, timeout = REQUEST_TIMEOUT_MS) {
@@ -158,7 +151,7 @@ const server = http.createServer(async (req,res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   if (req.method === 'OPTIONS') { res.writeHead(204, { 'Access-Control-Allow-Origin':'*', 'Access-Control-Allow-Methods':'GET,POST,OPTIONS', 'Access-Control-Allow-Headers':'Content-Type' }); return res.end(); }
   if (url.pathname.startsWith('/api/') && limited(req)) return json(res,429,{error:'Слишком много запросов. Подождите минуту и повторите.'});
-  if (req.method === 'GET' && url.pathname === '/api/health') return json(res,200,{ok:true,version:'1.2.0',service:'BIZFINDER search proxy',cacheEntries:cache.size,upstreams:OVERPASS.length,searchTimeoutMs:SEARCH_TOTAL_TIMEOUT_MS});
+  if (req.method === 'GET' && url.pathname === '/api/health') return json(res,200,{ok:true,version:'1.3.0',service:'BIZFINDER search proxy',cacheEntries:cache.size,upstreams:OVERPASS.length,searchTimeoutMs:SEARCH_TOTAL_TIMEOUT_MS});
   if (req.method === 'GET' && url.pathname === '/api/geocode') {
     try { const q=(url.searchParams.get('q')||'').trim(); if(!q) return json(res,400,{error:'Введите город или адрес'}); return json(res,200,await geocode(q)); }
     catch(e){ return json(res,e.status||502,{error:e.message}); }
