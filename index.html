@@ -145,44 +145,21 @@ function normalizeOsmElements(elements,center){
  }).filter(Boolean).slice(0,1500);
 }
 async function fetchBusinesses(center,radius){
- const category=overpassCategory(),started=Date.now(),status=document.getElementById('cityStatus');
- if(await backendReady()){
-  try{
-   if(status)status.textContent='Запрашиваем сервер BIZFINDER…';
-   const data=await apiJson('/api/search',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({lat:center.lat,lon:center.lng,radius:Number(radius),category})},22000);
-   if(!Array.isArray(data.elements))throw new Error('Backend вернул некорректный список организаций');
-   return {businesses:normalizeOsmElements(data.elements,center),provider:data.provider||'BIZFINDER backend',elapsedMs:data.elapsedMs||Date.now()-started};
-  }catch(e){console.warn('BIZFINDER backend search failed; trying public Overpass:',e.message)}
+ const status=document.getElementById('cityStatus');
+ if(status)status.textContent='Проверяем облачный сервер BIZFINDER…';
+ if(!(await backendReady())){
+  throw new Error('Облачный backend не найден. Откройте сайт по адресу Render *.onrender.com, а не через GitHub Pages. В Render проверьте Resources → bizfinder → Logs и статус Live.');
  }
- const query=overpassQuery(center,radius,category);
- const endpoints=[
-  'https://overpass-api.de/api/interpreter',
-  'https://overpass.kumi.systems/api/interpreter',
-  'https://overpass.private.coffee/api/interpreter',
-  'https://overpass.nchc.org.tw/api/interpreter'
- ];
- const errors=[];
- for(const endpoint of endpoints){
-  const host=new URL(endpoint).hostname;
-  if(status)status.textContent='Ищем организации через OpenStreetMap ('+host+')…';
-  try{
-   let data;
-   try{
-    // GET avoids the browser CORS preflight triggered by form-urlencoded POST.
-    // The bounded query is short enough for a normal URL.
-    data=await fetchExternalJson(endpoint+'?data='+encodeURIComponent(query),{},11000);
-   }catch(getError){
-    // Only retry with POST when the server explicitly rejects the GET method/URL.
-    // Do not POST after a timeout or network failure: that would repeat a doomed preflight.
-    if(/HTTP (400|405|406|413|414|415)/.test(getError.message)){
-     data=await fetchExternalJson(endpoint,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8'},body:new URLSearchParams({data:query}).toString()},9000);
-    }else throw getError;
-   }
-   if(!data||!Array.isArray(data.elements))throw new Error('ответ без массива elements');
-   return {businesses:normalizeOsmElements(data.elements,center),provider:host,elapsedMs:Date.now()-started};
-  }catch(e){errors.push(host+': '+e.message);console.warn('Overpass endpoint failed:',host,e.message)}
- }
- throw new Error('Публичные источники OpenStreetMap не ответили. Это сетевой отказ или ограничение доступа, а не отсутствие бизнесов. '+errors.join(' | '));
+ if(status)status.textContent='Ищем организации на сервере BIZFINDER…';
+ const category=overpassCategory();
+ const result=await apiJson('/api/search',{
+  method:'POST',
+  headers:{'Content-Type':'application/json'},
+  body:JSON.stringify({lat:center.lat,lon:center.lng,radius:Number(radius),category})
+ },65000);
+ if(!Array.isArray(result.elements))throw new Error('Сервер BIZFINDER вернул некорректный ответ.');
+ const businessesFound=normalizeOsmElements(result.elements,center);
+ return {businesses:businessesFound,provider:result.provider||'BIZFINDER cloud',elapsedMs:result.elapsedMs||0,serverVersion:result.version||'unknown'};
 }
 async function searchBusinesses(){
  const city=document.getElementById('city').value.trim();if(!city){toast('Введите город или адрес');return}
