@@ -55,16 +55,25 @@ function getSearchBox(lat,lon,radius){
   const km=Number(radius),dLat=km/111.32,dLon=km/(111.32*Math.max(0.15,Math.cos(lat*Math.PI/180)));
   return `${(lat-dLat).toFixed(5)},${(lon-dLon).toFixed(5)},${(lat+dLat).toFixed(5)},${(lon+dLon).toFixed(5)}`;
 }
-function makeQuery(lat, lon, radius, category, broad=false) {
-  const box=getSearchBox(lat,lon,radius);
-  if (CATEGORY[category]) return `[out:json][timeout:20];(nwr(${box})[name]${CATEGORY[category]};);out center tags 350;`;
-  if (broad) return `[out:json][timeout:20];(nwr(${box})[name];);out center tags 800;`;
-  const selectors=['[amenity]','[shop]','[office]','[craft]','[leisure]','[tourism]','[healthcare]'];
-  return `[out:json][timeout:20];(${selectors.map(tag=>`nwr(${box})[name]${tag};`).join('')});out center tags 600;`;
+function getSearchBox(lat,lon,radius){
+  const km=Number(radius),dLat=km/111.32,dLon=km/(111.32*Math.max(0.15,Math.cos(lat*Math.PI/180)));
+  return `${(lat-dLat).toFixed(5)},${(lon-dLon).toFixed(5)},${(lat+dLat).toFixed(5)},${(lon+dLon).toFixed(5)}`;
 }
-function isBusinessElement(el){
+function makeQuery(lat,lon,radius,category,mode='business'){
+  const box=getSearchBox(lat,lon,radius);
+  const selector=CATEGORY[category];
+  if(selector) return `[out:json][timeout:25];(nwr(${box})[name]${selector};);out center tags 500;`;
+  if(mode==='named') return `[out:json][timeout:25];(nwr(${box})[name];);out center tags 1200;`;
+  // Search business features independently; no unsupported regex on tag keys.
+  const tags=['amenity','shop','office','craft','leisure','tourism','healthcare','building'];
+  return `[out:json][timeout:25];(${tags.map(tag=>`nwr(${box})[name][${tag}];`).join('')});out center tags 900;`;
+}
+function isBusinessElement(el,allowNamed=false){
   const t=el.tags||{};
-  return ['amenity','shop','office','craft','leisure','tourism','healthcare'].some(k=>!!t[k]);
+  if(['amenity','shop','office','craft','leisure','tourism','healthcare'].some(k=>!!t[k]))return true;
+  if(['commercial','retail','industrial','office','public','warehouse'].includes(t.building))return true;
+  if(allowNamed && t.name && !t.highway && !t.waterway && !t.natural && !t.boundary && !t.place)return true;
+  return false;
 }
 async function upstream(url, options, timeout = REQUEST_TIMEOUT_MS) {
   const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), timeout);
@@ -81,45 +90,41 @@ async function upstream(url, options, timeout = REQUEST_TIMEOUT_MS) {
   finally { clearTimeout(timer); }
 }
 function distanceKm(lat1,lon1,lat2,lon2){const rad=x=>x*Math.PI/180;const dLat=rad(lat2-lat1),dLon=rad(lon2-lon1);const a=Math.sin(dLat/2)**2+Math.cos(rad(lat1))*Math.cos(rad(lat2))*Math.sin(dLon/2)**2;return 6371*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));}
-async function searchOverpass(lat, lon, radius, category) {
+async function searchOverpass(lat,lon,radius,category){
   const started=Date.now();
   const checks=await Promise.all(OVERPASS.map(async endpoint=>{
-    const host=new URL(endpoint).hostname, attemptStarted=Date.now(), errors=[];
-    for(const broad of [false,true]){
+    const host=new URL(endpoint).hostname,attemptStarted=Date.now(),errors=[];
+    for(const mode of ['business','named']){
       try{
-        const query=makeQuery(lat,lon,radius,category,broad);
+        const query=makeQuery(lat,lon,radius,category,mode);
         let data;
         try{
-          data=await upstream(`${endpoint}?data=${encodeURIComponent(query)}`,{method:'GET'},broad?10000:9000);
+          data=await upstream(`${endpoint}?data=${encodeURIComponent(query)}`,{method:'GET'},mode==='named'?12000:10000);
         }catch(getError){
           if(/HTTP (400|405|406|413|414|415|429)/.test(getError.message)){
             const body=new URLSearchParams({data:query}).toString();
-            data=await upstream(endpoint,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded; charset=UTF-8'},body},7000);
+            data=await upstream(endpoint,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded; charset=UTF-8'},body},8000);
           }else throw getError;
         }
-        if(!data||!Array.isArray(data.elements))throw new Error('Источник вернул JSON без массива elements');
+        if(!data||!Array.isArray(data.elements))throw new Error('Ответ без массива elements');
         const elements=data.elements.filter(el=>{
-          if(!isBusinessElement(el))return false;
+          if(!isBusinessElement(el,mode==='named'))return false;
           const p=el.center||el;
           return Number.isFinite(+p.lat)&&Number.isFinite(+p.lon)&&distanceKm(lat,lon,+p.lat,+p.lon)<=radius;
         });
-        if(elements.length)return {ok:true,host,elements,elapsedMs:Date.now()-attemptStarted,queryMode:broad?'broad-fallback':'business-tags'};
-        if(!broad)continue;
-        return {ok:true,host,elements:[],elapsedMs:Date.now()-attemptStarted,queryMode:'broad-fallback-empty'};
-      }catch(e){errors.push(e.message);if(!broad)continue;}
+        if(elements.length)return {ok:true,host,elements,mode,elapsedMs:Date.now()-attemptStarted};
+        if(mode==='named')return {ok:true,host,elements:[],mode,elapsedMs:Date.now()-attemptStarted};
+      }catch(e){errors.push(e.message);}
     }
     return {ok:false,host,error:errors.join(' / '),elapsedMs:Date.now()-attemptStarted};
   }));
-  const successful=checks.filter(x=>x.ok);
-  const nonEmpty=successful.filter(x=>x.elements.length>0).sort((a,b)=>b.elements.length-a.elements.length);
+  const good=checks.filter(x=>x.ok),nonEmpty=good.filter(x=>x.elements.length).sort((a,b)=>b.elements.length-a.elements.length);
   if(nonEmpty.length){
     const best=nonEmpty[0];
-    return {elements:best.elements,provider:best.host,queryMode:best.queryMode,providerResults:checks.map(x=>({host:x.host,ok:x.ok,count:x.elements?.length||0,error:x.error||null,elapsedMs:x.elapsedMs})),timestamp:new Date().toISOString(),elapsedMs:Date.now()-started,queryRadiusKm:radius};
+    return {elements:best.elements,provider:best.host,queryMode:best.mode,providerResults:checks.map(x=>({host:x.host,ok:x.ok,count:x.elements?.length||0,mode:x.mode||null,error:x.error||null,elapsedMs:x.elapsedMs})),timestamp:new Date().toISOString(),elapsedMs:Date.now()-started,queryRadiusKm:radius};
   }
-  if(successful.length){
-    return {elements:[],provider:successful[0].host,providerResults:checks.map(x=>({host:x.host,ok:x.ok,count:x.elements?.length||0,error:x.error||null,elapsedMs:x.elapsedMs})),warning:'Источники ответили, но OpenStreetMap не вернул подходящие объекты в выбранной области. Попробуйте увеличить радиус или выбрать категорию.',timestamp:new Date().toISOString(),elapsedMs:Date.now()-started,queryRadiusKm:radius};
-  }
-  const err=new Error('Не удалось получить организации ни из одного источника. '+checks.map(x=>x.host+': '+x.error).join(' | '));
+  if(good.length)return {elements:[],provider:good[0].host,providerResults:checks.map(x=>({host:x.host,ok:x.ok,count:x.elements?.length||0,error:x.error||null,elapsedMs:x.elapsedMs})),warning:'Ответ получен, но подходящих объектов с названиями в выбранном радиусе не найдено. Попробуйте увеличить радиус.',timestamp:new Date().toISOString(),elapsedMs:Date.now()-started,queryRadiusKm:radius};
+  const err=new Error('Все источники поиска недоступны: '+checks.map(x=>x.host+': '+x.error).join(' | '));
   err.status=502;err.details={elapsedMs:Date.now()-started,checks:checks.map(({host,error,elapsedMs})=>({host,error,elapsedMs}))};throw err;
 }
 async function geocode(q) {
