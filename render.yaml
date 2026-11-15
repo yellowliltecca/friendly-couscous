@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: bizfinder
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: UPSTREAM_TIMEOUT_MS
+        value: "14000"
+      - key: SEARCH_TOTAL_TIMEOUT_MS
+        value: "52000"
